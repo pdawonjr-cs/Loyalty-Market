@@ -11,13 +11,13 @@ LocalMarket is a mobile-first marketplace preview with a same-origin Node.js API
 From this directory:
 
 ```powershell
-npm run admin:create
-npm start
+node server.js create-admin
+node server.js
 ```
 
 The first command asks for an admin email and password in the terminal. Password input is hidden. Use a unique password with at least 14 characters. The server stores only a salted scrypt hash; the plaintext password is never written to the project files. Open `http://localhost:8080` in your browser.
 
-For an existing local database, change the admin password with `npm run admin:reset-password`. This signs out all existing admin sessions.
+For an existing local database, change the admin password with `node server.js reset-admin-password`. This signs out all existing admin sessions.
 
 The database is created at `data/localmarket.sqlite`. It is ignored by Git. Back it up securely and do not place the live database in a public static hosting folder.
 
@@ -50,4 +50,5 @@ The server binds to `127.0.0.1` by default. Put it behind an HTTPS reverse proxy
 - Customer and vendor contact details are stored in SQLite. Define retention and deletion rules, restrict and monitor operator access, protect backups, and publish the final privacy policy before accepting real users.
 - Admin password recovery is a local server operation. Add a controlled recovery process and multi-factor authentication before production use.
 - The sample admin page is not a substitute for a reviewed production security assessment.
+
 
