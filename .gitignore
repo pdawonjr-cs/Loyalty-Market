@@ -1,0 +1,22 @@
+# Android Studio / Gradle outputs
+.gradle/
+build/
+*/build/
+local.properties
+*.iml
+.idea/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Never commit signing material or private environment files
+*.jks
+*.keystore
+*.env
+.env.*
+secrets.properties
+
+# OS/editor files
+.DS_Store
+Thumbs.db

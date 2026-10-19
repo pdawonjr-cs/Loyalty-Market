@@ -1,0 +1,14 @@
+{
+  "name": "localmarket-liberia",
+  "version": "0.2.0",
+  "private": true,
+  "description": "LocalMarket Liberia marketplace preview with a Node.js and SQLite backend",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "admin:create": "node server.js create-admin",
+    "admin:reset-password": "node server.js reset-admin-password"
+  }
+}
