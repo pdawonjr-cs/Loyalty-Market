@@ -10,9 +10,14 @@ const readline = require('node:readline');
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const DB_FILE = path.join(DATA_DIR, 'localmarket.sqlite');
-const HOST = process.env.HOST || '127.0.0.1';
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const HOST = process.env.HOST || (NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 const PORT = Number(process.env.PORT || 8080);
-const APP_ORIGIN = new URL(process.env.APP_ORIGIN || `http://localhost:${PORT}`).origin;
+const APP_ORIGIN = new URL(process.env.APP_ORIGIN || process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).origin;
+const MARKETPLACE_MODE = process.env.MARKETPLACE_MODE || 'preview';
+const PUBLIC_CONTACT_EMAIL = String(process.env.PUBLIC_CONTACT_EMAIL || '').trim();
+const PUBLIC_INTAKE_ENABLED = process.env.PUBLIC_INTAKE_ENABLED === 'true';
+const DATA_RETENTION_DAYS = process.env.DATA_RETENTION_DAYS === undefined ? null : Number(process.env.DATA_RETENTION_DAYS);
 const COOKIE_NAME = APP_ORIGIN.startsWith('https://') ? '__Host-lm_session' : 'lm_session';
 const SESSION_SECONDS = 4 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -24,8 +29,20 @@ const ALLOWED_STATUSES = new Set(['Verified', 'Declined']);
 const loginFailures = new Map();
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PORT must be a valid TCP port.');
+if (!['preview', 'pilot'].includes(MARKETPLACE_MODE)) throw new Error('MARKETPLACE_MODE must be preview or pilot.');
 if (!APP_ORIGIN.startsWith('https://') && !['localhost', '127.0.0.1'].includes(HOST)) {
   throw new Error('Non-local deployments must set APP_ORIGIN to an HTTPS origin.');
+}
+if (PUBLIC_CONTACT_EMAIL && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(PUBLIC_CONTACT_EMAIL)) throw new Error('PUBLIC_CONTACT_EMAIL must be a valid email address.');
+if (DATA_RETENTION_DAYS !== null && (!Number.isInteger(DATA_RETENTION_DAYS) || DATA_RETENTION_DAYS < 1 || DATA_RETENTION_DAYS > 3650)) {
+  throw new Error('DATA_RETENTION_DAYS must be a whole number between 1 and 3650.');
+}
+if (NODE_ENV === 'production') {
+  if (!(process.env.APP_ORIGIN || process.env.RENDER_EXTERNAL_URL) || !APP_ORIGIN.startsWith('https://')) throw new Error('Set APP_ORIGIN or use a host that provides RENDER_EXTERNAL_URL before starting in production.');
+  if (!PUBLIC_CONTACT_EMAIL) throw new Error('Set PUBLIC_CONTACT_EMAIL before starting in production.');
+  if (DATA_RETENTION_DAYS === null) throw new Error('Set DATA_RETENTION_DAYS before starting in production.');
+  if (!process.env.DATA_DIR) throw new Error('Set DATA_DIR to a durable, private data directory before starting in production.');
+  if (DATA_DIR === ROOT || DATA_DIR.startsWith(`${ROOT}${path.sep}`)) throw new Error('DATA_DIR must be outside the application directory in production.');
 }
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(DB_FILE, { timeout: 5000 });
@@ -56,7 +73,8 @@ db.exec(`
     description TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Pending review' CHECK(status IN ('Pending review','Verified','Declined')),
     created_at INTEGER NOT NULL,
-    reviewed_at INTEGER
+    reviewed_at INTEGER,
+    privacy_accepted_at INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   CREATE TABLE IF NOT EXISTS products (
     id TEXT PRIMARY KEY,
@@ -83,12 +101,30 @@ db.exec(`
     items_json TEXT NOT NULL,
     total INTEGER NOT NULL CHECK(total >= 0),
     status TEXT NOT NULL DEFAULT 'New' CHECK(status IN ('New','Confirmed','Fulfilled','Cancelled')),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    privacy_accepted_at INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
   CREATE INDEX IF NOT EXISTS vendors_status_idx ON vendors(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS orders_created_idx ON orders(created_at DESC);
 `);
+
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some(item => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+ensureColumn('vendors', 'privacy_accepted_at', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('orders', 'privacy_accepted_at', 'INTEGER NOT NULL DEFAULT 0');
+
+function pruneExpiredSubmissions() {
+  if (DATA_RETENTION_DAYS === null) return;
+  const cutoff = Date.now() - DATA_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  db.prepare('UPDATE products SET active=0 WHERE vendor_id IN (SELECT id FROM vendors WHERE status != \'Verified\' AND COALESCE(reviewed_at,created_at) < ?)').run(cutoff);
+  db.prepare('DELETE FROM orders WHERE created_at < ?').run(cutoff);
+  db.prepare("DELETE FROM vendors WHERE status != 'Verified' AND COALESCE(reviewed_at,created_at) < ?").run(cutoff);
+}
+pruneExpiredSubmissions();
+setInterval(pruneExpiredSubmissions, 24 * 60 * 60 * 1000).unref();
 
 function seedProducts() {
   if (db.prepare('SELECT COUNT(*) AS count FROM products').get().count > 0) return;
@@ -105,6 +141,9 @@ function json(res, status, value, extraHeaders = {}) {
   const body = JSON.stringify(value);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', ...extraHeaders });
   res.end(body);
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 }
 function fail(res, status, message) { json(res, status, { error: message }); }
 function text(value, max, required = true) {
@@ -214,11 +253,17 @@ function countLoginFailure(key) {
 }
 
 function productRows() {
+  const verifiedOnly = MARKETPLACE_MODE === 'pilot' ? "AND v.status='Verified'" : '';
   return db.prepare(`SELECT p.id,p.name,p.category,p.price,p.unit,
     COALESCE(v.name,p.sample_vendor) AS vendor,
+    COALESCE(v.area,'Liberia') AS area,
     CASE WHEN v.status='Verified' THEN 1 ELSE 0 END AS verified,
     p.rating,p.reviews,p.emoji,p.background AS bg,p.badge,p.description AS desc
-    FROM products p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.active=1 ORDER BY p.id`).all();
+    FROM products p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.active=1 ${verifiedOnly} ORDER BY p.id`).all();
+}
+function intakeConfigured() { return Boolean(PUBLIC_INTAKE_ENABLED && PUBLIC_CONTACT_EMAIL && DATA_RETENTION_DAYS !== null); }
+function requireIntakeConfiguration() {
+  if (!intakeConfigured()) throw new HttpError(503, 'Marketplace contact and data-retention settings are not complete. Please try again later.');
 }
 function adminProductRows() {
   return db.prepare(`SELECT p.id,p.name,p.category,p.price,p.unit,COALESCE(v.name,p.sample_vendor) AS vendor,
@@ -235,12 +280,25 @@ function adminOrderRows() {
 
 async function handleApi(req, res, url) {
   const p = url.pathname;
-  if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true });
+  if (req.method === 'GET' && p === '/api/health') {
+    db.prepare('SELECT 1').get();
+    return json(res, 200, { ok: true });
+  }
+  if (req.method === 'GET' && p === '/api/config') return json(res, 200, {
+    mode: MARKETPLACE_MODE,
+    intakeOpen: intakeConfigured(),
+    ordersOpen: MARKETPLACE_MODE === 'pilot' && intakeConfigured(),
+    publicContactEmail: PUBLIC_CONTACT_EMAIL,
+    dataRetentionDays: DATA_RETENTION_DAYS
+  });
   if (req.method === 'GET' && p === '/api/products') return json(res, 200, { products: productRows() });
 
   if (req.method === 'POST' && p === '/api/orders') {
+    requireIntakeConfiguration();
+    if (MARKETPLACE_MODE !== 'pilot') throw new HttpError(403, 'Order requests are not open in preview mode.');
     enforceOrigin(req);
     const body = await readJson(req);
+    if (body.privacyAccepted !== true) throw new HttpError(400, 'Please read and accept the privacy notice before submitting.');
     const customerName = text(body.name, 100);
     const phone = validPhone(body.phone);
     const area = text(body.area, 140);
@@ -248,7 +306,8 @@ async function handleApi(req, res, url) {
     if (!ALLOWED_PAYMENTS.has(payment) || !Array.isArray(body.items) || body.items.length < 1 || body.items.length > 20) throw new HttpError(400, 'Invalid order details.');
     const normalized = [];
     let total = 0;
-    const productQuery = db.prepare('SELECT id,name,price,unit FROM products WHERE id=? AND active=1');
+    const productQuery = db.prepare(`SELECT p.id,p.name,p.price,p.unit FROM products p JOIN vendors v ON v.id=p.vendor_id
+      WHERE p.id=? AND p.active=1 AND v.status='Verified'`);
     for (const line of body.items) {
       if (!line || typeof line.id !== 'string' || !Number.isInteger(line.qty) || line.qty < 1 || line.qty > 99) throw new HttpError(400, 'Invalid order items.');
       const product = productQuery.get(line.id);
@@ -258,18 +317,20 @@ async function handleApi(req, res, url) {
       normalized.push({ id: product.id, name: product.name, price: product.price, unit: product.unit, qty: line.qty });
     }
     const id = `LM-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-    db.prepare('INSERT INTO orders(id,customer_name,phone,area,payment_method,items_json,total,status,created_at) VALUES(?,?,?,?,?,?,?,\'New\',?)')
-      .run(id, customerName, phone, area, payment, JSON.stringify(normalized), total, Date.now());
+    db.prepare('INSERT INTO orders(id,customer_name,phone,area,payment_method,items_json,total,status,created_at,privacy_accepted_at) VALUES(?,?,?,?,?,?,?,\'New\',?,?)')
+      .run(id, customerName, phone, area, payment, JSON.stringify(normalized), total, Date.now(), Date.now());
     return json(res, 201, { id, total, status: 'New' });
   }
 
   if (req.method === 'POST' && p === '/api/vendor-applications') {
+    requireIntakeConfiguration();
     enforceOrigin(req);
     const body = await readJson(req);
+    if (body.privacyAccepted !== true) throw new HttpError(400, 'Please read and accept the privacy notice before submitting.');
     const category = text(body.category, 40);
     const id = crypto.randomUUID();
-    db.prepare('INSERT INTO vendors(id,name,contact,phone,category,area,description,status,created_at) VALUES(?,?,?,?,?,?,?,\'Pending review\',?)')
-      .run(id, text(body.shop,100), text(body.owner,100), validPhone(body.phone), category, text(body.area,140), text(body.description,1000), Date.now());
+    db.prepare('INSERT INTO vendors(id,name,contact,phone,category,area,description,status,created_at,privacy_accepted_at) VALUES(?,?,?,?,?,?,?,\'Pending review\',?,?)')
+      .run(id, text(body.shop,100), text(body.owner,100), validPhone(body.phone), category, text(body.area,140), text(body.description,1000), Date.now(), Date.now());
     return json(res, 201, { id, status: 'Pending review' });
   }
 
@@ -380,8 +441,20 @@ async function serveStatic(req, res, url) {
   const filePath = path.resolve(ROOT, `.${requested}`);
   if (!filePath.startsWith(`${ROOT}${path.sep}`) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new HttpError(404, 'Not found.');
   const contentType = mimeTypes.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-  if (req.method === 'HEAD') return res.end();
+  const headers = { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+  if (req.method === 'HEAD') { res.writeHead(200, headers); return res.end(); }
+  if (path.basename(filePath) === 'privacy.html') {
+    const contact = PUBLIC_CONTACT_EMAIL
+      ? `<a href="mailto:${escapeHtml(PUBLIC_CONTACT_EMAIL)}">${escapeHtml(PUBLIC_CONTACT_EMAIL)}</a>`
+      : 'Not configured; submissions are disabled.';
+    const retention = DATA_RETENTION_DAYS === null ? 'Not configured; submissions are disabled.' : `${DATA_RETENTION_DAYS} days`;
+    const page = fs.readFileSync(filePath, 'utf8')
+      .replaceAll('{{PUBLIC_CONTACT_EMAIL}}', contact)
+      .replaceAll('{{DATA_RETENTION_DAYS}}', retention);
+    res.writeHead(200, { ...headers, 'Content-Length': Buffer.byteLength(page) });
+    return res.end(page);
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(filePath).pipe(res);
 }
 const server = http.createServer(async (req, res) => {
@@ -456,4 +529,11 @@ if (command === 'create-admin' || command === 'reset-admin-password') {
   process.exitCode = 2;
 } else {
   server.listen(PORT, HOST, () => console.log(`LocalMarket server listening at ${APP_ORIGIN}`));
+  function shutdown() {
+    server.close(() => { db.close(); process.exit(0); });
+    setTimeout(() => process.exit(1), 10000).unref();
+  }
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
+

@@ -21,6 +21,7 @@ let activeCategory = 'all';
 let adminTab = 'overview';
 let csrfToken = '';
 let verifiedVendors = [];
+let marketplaceConfig = { mode: 'preview', intakeOpen: false, ordersOpen: false, publicContactEmail: '', dataRetentionDays: null };
 const modal = document.getElementById('modal');
 const backdrop = document.getElementById('modalBackdrop');
 
@@ -83,21 +84,43 @@ function renderProducts() {
   document.getElementById('products').innerHTML = list.map(product => {
     const check = product.verified ? '<span class="vendor-check">✓ Verified</span>' : '<span>Preview seller</span>';
     const rating = product.reviews ? `<div class="rating">★ ${esc(product.rating)} <span style="color:var(--muted)">(${esc(product.reviews)})</span></div>` : '<div class="rating">No reviews yet</div>';
-    return `<article class="product" data-product-id="${esc(product.id)}" tabindex="0"><div class="product-photo" style="background:${esc(product.bg)}"><small>${esc(product.badge || 'Local favorite')}</small><span>${esc(product.emoji)}</span><button class="heart" data-action="favorite" aria-label="Save ${esc(product.name)}">♡</button></div><div class="product-info"><div class="vendor-line">${esc(product.vendor)} ${check} <span>· Monrovia</span></div><h3>${esc(product.name)}</h3><div class="product-foot"><div><div class="price">${money(product.price)}</div>${rating}</div><button class="quick-add" data-action="add" data-id="${esc(product.id)}">+ Add</button></div></div></article>`;
+    const add = marketplaceConfig.ordersOpen && product.verified
+      ? `<button class="quick-add" data-action="add" data-id="${esc(product.id)}">+ Add</button>`
+      : `<span class="quick-add" aria-label="Not available to order">${product.verified ? 'Orders soon' : 'Example'}</span>`;
+    return `<article class="product" data-product-id="${esc(product.id)}" tabindex="0"><div class="product-photo" style="background:${esc(product.bg)}"><small>${esc(product.badge || 'Local listing')}</small><span>${esc(product.emoji)}</span><button class="heart" data-action="favorite" aria-label="Save ${esc(product.name)}">♡</button></div><div class="product-info"><div class="vendor-line">${esc(product.vendor)} ${check} <span>· ${esc(product.area)}</span></div><h3>${esc(product.name)}</h3><div class="product-foot"><div><div class="price">${money(product.price)}</div>${rating}</div>${add}</div></div></article>`;
   }).join('');
   document.getElementById('noProducts').hidden = list.length > 0;
+  if (!list.length) {
+    const noListings = marketplaceConfig.mode === 'pilot' && products.length === 0;
+    document.getElementById('noProductsTitle').textContent = noListings ? 'First listings are on the way' : 'No matches yet';
+    document.getElementById('noProductsMessage').textContent = noListings
+      ? 'We are onboarding verified local vendors. Check back soon.'
+      : 'Try another search or category.';
+  }
 }
 
 async function loadProducts() {
   try {
-    const data = await api('/api/products');
+    const [config, data] = await Promise.all([api('/api/config'), api('/api/products')]);
+    marketplaceConfig = config;
     products = data.products;
+    cart = marketplaceConfig.ordersOpen ? cart.filter(item => products.some(product => product.id === item.id && product.verified)) : [];
+    saveCart();
+    updateCartCount();
+    document.getElementById('marketStatus').textContent = marketplaceConfig.mode === 'pilot' ? 'Community pilot' : 'Preview mode · sample listings';
+    document.getElementById('previewHeroArt').hidden = marketplaceConfig.mode === 'pilot';
+    document.getElementById('productsIntro').textContent = marketplaceConfig.mode === 'pilot'
+      ? 'Listings from vendors reviewed by the LocalMarket team.'
+      : 'Examples help illustrate the idea; they are not real offers and cannot be ordered.';
+    document.getElementById('siteNotice').textContent = marketplaceConfig.ordersOpen
+      ? 'Community pilot · order requests are confirmed by phone; no payment is collected here.'
+      : 'Preview mode · example listings are not real offers and cannot be ordered.';
     renderProducts();
   } catch (error) {
     document.getElementById('products').innerHTML = '';
     document.getElementById('noProducts').hidden = false;
-    document.querySelector('#noProducts strong').textContent = 'Marketplace is unavailable';
-    document.querySelector('#noProducts').lastChild.textContent = 'Start the server and refresh this page.';
+    document.getElementById('noProductsTitle').textContent = 'Marketplace is unavailable';
+    document.getElementById('noProductsMessage').textContent = 'Start the server and refresh this page.';
     toast(error.message);
   }
 }
@@ -116,7 +139,7 @@ function clearFilter() {
 }
 function addToCart(id) {
   const product = products.find(item => item.id === id);
-  if (!product) return;
+  if (!product || !marketplaceConfig.ordersOpen || !product.verified) return;
   const item = cart.find(entry => entry.id === id);
   if (item) item.qty = Math.min(99, item.qty + 1);
   else cart.push({ id, qty: 1 });
@@ -126,6 +149,10 @@ function addToCart(id) {
 }
 
 function openCart() {
+  if (!marketplaceConfig.ordersOpen) {
+    showModal(`<div class="modal-head"><div><h2>Shopping basket</h2><p class="modal-sub">Order requests are not open yet.</p></div><button class="close" data-action="close">×</button></div><p class="notice">This is a preview. The example listings are not real offers and you cannot place an order yet.</p><button class="btn btn-primary wide" data-action="close">Keep browsing</button>`);
+    return;
+  }
   const rows = cart.map(item => ({ ...item, product: products.find(product => product.id === item.id) })).filter(item => item.product);
   const total = rows.reduce((sum, item) => sum + item.product.price * item.qty, 0);
   showModal(`<div class="modal-head"><div><h2>Your basket</h2><p class="modal-sub">${rows.reduce((sum, item) => sum + item.qty, 0)} item(s)</p></div><button class="close" data-action="close">×</button></div>${rows.length ? `<div class="cart-list">${rows.map(item => `<div class="cart-item"><span class="cart-emoji">${esc(item.product.emoji)}</span><div class="cart-item-info"><b>${esc(item.product.name)}</b><small>${money(item.product.price)} · ${esc(item.product.unit)}</small></div><div class="qty"><button data-action="quantity" data-id="${esc(item.id)}" data-delta="-1">−</button>${item.qty}<button data-action="quantity" data-id="${esc(item.id)}" data-delta="1">+</button></div></div>`).join('')}</div><div class="cart-total"><span>Subtotal</span><span>${money(total)}</span></div><p style="font-size:11px;color:var(--muted)">Delivery is arranged with the vendor and confirmed at checkout.</p><button class="btn btn-primary wide" data-action="checkout">Continue to checkout →</button>` : `<div class="empty"><div style="font-size:38px">🛍️</div><strong>Your basket is waiting</strong>Add something lovely from a local seller.</div><button class="btn btn-primary wide" data-action="close">Keep browsing</button>`}`);
@@ -141,9 +168,9 @@ function changeQty(id, delta) {
   openCart();
 }
 function checkout() {
-  if (!cart.length) return;
+  if (!marketplaceConfig.ordersOpen || !cart.length) return;
   const total = cart.reduce((sum, item) => sum + (products.find(product => product.id === item.id)?.price || 0) * item.qty, 0);
-  showModal(`<div class="modal-head"><div><h2>Checkout</h2><p class="modal-sub">Your details will be sent to the LocalMarket server to process this order request.</p></div><button class="close" data-action="cart">×</button></div><form data-form="checkout"><div class="field"><label>Your name</label><input required name="name" autocomplete="name" maxlength="100" placeholder="Full name"></div><div class="form-row"><div class="field"><label>Phone number</label><input required name="phone" type="tel" maxlength="40" placeholder="+231 77…"></div><div class="field"><label>Delivery area</label><input required name="area" maxlength="140" placeholder="Paynesville, Monrovia…"></div></div><div class="field"><label>Payment preference</label><select name="payment"><option>Mobile money — confirm with seller</option><option>Cash on delivery — confirm with seller</option></select></div><div class="cart-total"><span>Order total</span><span>${money(total)}</span></div><div class="notice">This submits an order request to the marketplace server. It does not collect payment or arrange delivery.</div><button class="btn btn-primary wide" type="submit">Place order request</button></form>`);
+  showModal(`<div class="modal-head"><div><h2>Request this order</h2><p class="modal-sub">The LocalMarket team will contact you by phone to confirm availability, payment, and delivery.</p></div><button class="close" data-action="cart">×</button></div><form data-form="checkout"><div class="field"><label>Your name</label><input required name="name" autocomplete="name" maxlength="100" placeholder="Full name"></div><div class="form-row"><div class="field"><label>Phone number</label><input required name="phone" type="tel" maxlength="40" placeholder="+231 77…"></div><div class="field"><label>Delivery area</label><input required name="area" maxlength="140" placeholder="Paynesville, Monrovia…"></div></div><div class="field"><label>Payment preference</label><select name="payment"><option>Mobile money — confirm with seller</option><option>Cash on delivery — confirm with seller</option></select></div><div class="cart-total"><span>Order total</span><span>${money(total)}</span></div><div class="notice">Submitting sends your name, phone number, area, and order details to LocalMarket for manual confirmation. No payment is taken and delivery is not arranged here.</div><label class="privacy-consent"><input required type="checkbox" name="privacyAccepted"> I have read the <a href="privacy.html" target="_blank" rel="noopener">privacy policy</a> and agree to this information being used for my order request. It is deleted after ${esc(marketplaceConfig.dataRetentionDays)} days.</label><button class="btn btn-primary wide" type="submit">Send order request</button></form>`);
 }
 async function submitOrder(form) {
   const data = new FormData(form);
@@ -152,6 +179,7 @@ async function submitOrder(form) {
   try {
     const result = await api('/api/orders', { method: 'POST', body: {
       name: data.get('name'), phone: data.get('phone'), area: data.get('area'), payment: data.get('payment'),
+      privacyAccepted: data.get('privacyAccepted') === 'on',
       items: cart.map(item => ({ id: item.id, qty: item.qty }))
     }});
     cart = [];
@@ -169,13 +197,24 @@ function openProduct(id) {
   if (!product) return;
   const verification = product.verified ? 'Verified local seller' : 'Preview sample — seller not verified';
   const rating = product.reviews ? `★ ${esc(product.rating)} (${esc(product.reviews)} reviews)` : 'No reviews yet';
-  showModal(`<div class="modal-head"><span class="eyebrow" style="color:var(--green)">${esc(verification)}</span><button class="close" data-action="close">×</button></div><div class="detail-layout"><div class="detail-art" style="background:${esc(product.bg)}">${esc(product.emoji)}</div><div class="detail-copy"><div class="vendor-line">${esc(product.vendor)} · Monrovia</div><h2>${esc(product.name)}</h2><div class="rating">${rating}</div><p>${esc(product.desc)}</p><div class="detail-price">${money(product.price)} <small style="font-size:12px;color:var(--muted);font-weight:500">/ ${esc(product.unit)}</small></div><p style="font-size:12px">Delivery details are confirmed with the vendor after your request.</p><button class="btn btn-primary wide" data-action="add-close" data-id="${esc(product.id)}">Add to basket</button></div></div>`, true);
+  const orderAction = marketplaceConfig.ordersOpen && product.verified
+    ? `<button class="btn btn-primary wide" data-action="add-close" data-id="${esc(product.id)}">Add to basket</button>`
+    : '<p class="notice">Preview example only. This listing is not available to order.</p>';
+  showModal(`<div class="modal-head"><span class="eyebrow" style="color:var(--green)">${esc(verification)}</span><button class="close" data-action="close">×</button></div><div class="detail-layout"><div class="detail-art" style="background:${esc(product.bg)}">${esc(product.emoji)}</div><div class="detail-copy"><div class="vendor-line">${esc(product.vendor)} · ${esc(product.area)}</div><h2>${esc(product.name)}</h2><div class="rating">${rating}</div><p>${esc(product.desc)}</p><div class="detail-price">${money(product.price)} <small style="font-size:12px;color:var(--muted);font-weight:500">/ ${esc(product.unit)}</small></div>${orderAction}</div></div>`, true);
 }
 function openVendor() {
-  showModal(`<div class="modal-head"><div><h2>Sell with LocalMarket</h2><p class="modal-sub">Tell us about your business. Our team will review your application.</p></div><button class="close" data-action="close">×</button></div><form data-form="vendor"><div class="field"><label>Business or shop name</label><input name="shop" required maxlength="100" placeholder="Your business name"></div><div class="form-row"><div class="field"><label>Your name</label><input name="owner" required maxlength="100" placeholder="Full name"></div><div class="field"><label>Phone / WhatsApp</label><input name="phone" type="tel" maxlength="40" required placeholder="+231 …"></div></div><div class="form-row"><div class="field"><label>Category</label><select name="category"><option>Fresh produce</option><option>Pantry</option><option>Arts & crafts</option><option>Fashion</option><option>Home & living</option><option>Other</option></select></div><div class="field"><label>Town or community</label><input name="area" maxlength="140" required placeholder="e.g. Monrovia"></div></div><div class="field"><label>What do you sell?</label><textarea name="description" maxlength="1000" required placeholder="Briefly describe your products"></textarea></div><div class="notice">Your application details will be sent to the marketplace server for staff review.</div><button class="btn btn-primary wide" type="submit">Submit vendor application</button></form>`);
+  if (!marketplaceConfig.intakeOpen) {
+    const contact = marketplaceConfig.publicContactEmail
+      ? ` You can contact the team at <a href="mailto:${esc(marketplaceConfig.publicContactEmail)}">${esc(marketplaceConfig.publicContactEmail)}</a> to learn about the pilot.`
+      : '';
+    showModal(`<div class="modal-head"><div><h2>Vendor applications are opening soon</h2><p class="modal-sub">We are preparing the privacy, backup, and review process before collecting contact information.</p></div><button class="close" data-action="close">×</button></div><p class="notice">No application details are collected on this site right now.${contact}</p><button class="btn btn-primary wide" data-action="close">Close</button>`);
+    return;
+  }
+  showModal(`<div class="modal-head"><div><h2>Sell with LocalMarket</h2><p class="modal-sub">Tell us about your business. Our team will review your application.</p></div><button class="close" data-action="close">×</button></div><form data-form="vendor"><div class="field"><label>Business or shop name</label><input name="shop" required maxlength="100" placeholder="Your business name"></div><div class="form-row"><div class="field"><label>Your name</label><input name="owner" required maxlength="100" placeholder="Full name"></div><div class="field"><label>Phone / WhatsApp</label><input name="phone" type="tel" maxlength="40" required placeholder="+231 …"></div></div><div class="form-row"><div class="field"><label>Category</label><select name="category"><option>Fresh produce</option><option>Pantry</option><option>Arts & crafts</option><option>Fashion</option><option>Home & living</option><option>Other</option></select></div><div class="field"><label>Town or community</label><input name="area" maxlength="140" required placeholder="e.g. Monrovia"></div></div><div class="field"><label>What do you sell?</label><textarea name="description" maxlength="1000" required placeholder="Briefly describe your products"></textarea></div><div class="notice">We use these details to review your application. Pending or declined applications are deleted after ${esc(marketplaceConfig.dataRetentionDays)} days.</div><label class="privacy-consent"><input required type="checkbox" name="privacyAccepted"> I have read the <a href="privacy.html" target="_blank" rel="noopener">privacy policy</a> and agree to my details being used for this application. Privacy contact: <a href="mailto:${esc(marketplaceConfig.publicContactEmail)}">${esc(marketplaceConfig.publicContactEmail)}</a>.</label><button class="btn btn-primary wide" type="submit">Submit vendor application</button></form>`);
 }
 async function submitVendorApplication(form) {
   const values = Object.fromEntries(new FormData(form).entries());
+  values.privacyAccepted = values.privacyAccepted === 'on';
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   try {
@@ -333,3 +372,4 @@ document.getElementById('logo')?.addEventListener('keydown', event => {
 renderCategories();
 updateCartCount();
 loadProducts();
+
