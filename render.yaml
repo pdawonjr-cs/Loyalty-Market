@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: localmarket-liberia
+    runtime: node
+    region: frankfurt
+    plan: starter
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.15.0
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: DATA_DIR
+        value: /var/data
+      - key: MARKETPLACE_MODE
+        value: preview
+      - key: PUBLIC_INTAKE_ENABLED
+        value: "false"
+      - key: PUBLIC_CONTACT_EMAIL
+        sync: false
+      - key: DATA_RETENTION_DAYS
+        value: "90"
+    disk:
+      name: localmarket-data
+      mountPath: /var/data
+      sizeGB: 1
+

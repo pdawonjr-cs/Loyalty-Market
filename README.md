@@ -1,54 +1,52 @@
 # LocalMarket Liberia
 
-LocalMarket is a mobile-first marketplace preview with a same-origin Node.js API and SQLite database. Product listings, vendor applications, order requests, and admin actions are stored on the server. The sample listings are examples, not active merchants. The preview does not collect payments or dispatch deliveries.
-
-## Requirements
-
-- Node.js 24.15 or later (the built-in `node:sqlite` API is used; no npm packages are required).
+LocalMarket is a mobile-first catalog and manual order-request pilot for local Liberian vendors. It is a same-origin Node.js service with a SQLite database; it is not a static site. The application does not collect payments, notify sellers, or arrange delivery.
 
 ## Run locally
 
-From this directory:
+Use Node.js 24.15 or later (`node:sqlite` is built into Node). From this directory:
 
-```powershell
+```sh
 node server.js create-admin
 node server.js
 ```
 
-The first command asks for an admin email and password in the terminal. Password input is hidden. Use a unique password with at least 14 characters. The server stores only a salted scrypt hash; the plaintext password is never written to the project files. Open `http://localhost:8080` in your browser.
+The admin command asks for an email and password in an interactive terminal. Password input is hidden. Use a unique password with at least 14 characters. The database is created at `data/localmarket.sqlite`, a Git-ignored path. Open `http://localhost:8080` in a browser.
 
-For an existing local database, change the admin password with `node server.js reset-admin-password`. This signs out all existing admin sessions.
+Local mode defaults to `MARKETPLACE_MODE=preview` and `PUBLIC_INTAKE_ENABLED=false`. It displays clearly labeled examples, does not accept orders, and does not collect vendor details until intake is explicitly enabled with privacy settings configured.
 
-The database is created at `data/localmarket.sqlite`. It is ignored by Git. Back it up securely and do not place the live database in a public static hosting folder.
+To reset the local admin password, run `node server.js reset-admin-password`.
 
-## Admin security
+## Deploy the web preview
 
-- Admin credentials are checked by the server, not embedded in the browser app.
-- Passwords use Node's asynchronous scrypt with a unique random salt.
+`render.yaml` defines a Render web service with a private persistent disk for SQLite. Follow [DEPLOYMENT.md](DEPLOYMENT.md) to configure it and [PILOT_LAUNCH.md](PILOT_LAUNCH.md) to recruit the first vendors and shoppers. Render's free web services cannot keep this SQLite database on disk; the Blueprint uses a paid service. Review the hosting bill before applying it.
+
+Production requires:
+
+- HTTPS through the host and `APP_ORIGIN` (Render's `RENDER_EXTERNAL_URL` is used automatically).
+- A private, persistent `DATA_DIR`.
+- A monitored `PUBLIC_CONTACT_EMAIL`.
+- A chosen `DATA_RETENTION_DAYS` period.
+
+Until those are configured, the server refuses to start in production. The Render Blueprint also leaves `PUBLIC_INTAKE_ENABLED=false`, so the deployed preview can be visited without collecting personal details. Preview mode blocks orders. Pilot mode hides all examples and accepts order requests only for active listings tied to a verified vendor. The app records privacy acceptance for vendor applications and order requests and automatically deletes expired orders and pending/declined vendor applications once a day. Verified vendor contact details are kept while the vendor relationship is active.
+
+## Admin security and operations
+
+- Admin credentials are checked by the server; passwords are stored as salted scrypt hashes.
 - Admin sessions use random, server-validated tokens; the database stores a SHA-256 token hash.
-- The session cookie is `HttpOnly` and `SameSite=Strict`, expires after four hours, and has `Secure` set when the configured app origin uses HTTPS.
-- Admin write requests require an origin match and a CSRF token.
-- Login attempts are limited by source IP; responses and server headers restrict caching and browser capabilities.
-- There is no client-side admin bypass and no sample password in source files.
+- The session cookie is `HttpOnly` and `SameSite=Strict`, expires after four hours, and uses `Secure` for HTTPS.
+- Admin write requests require an origin match and CSRF token.
+- Login attempts are limited by source IP; responses include browser security headers.
+- There is no default admin password in source files.
+- Order requests are manual inquiries, not confirmed purchases. An operator must review the admin dashboard every business day and contact both sides by phone or WhatsApp.
+- The operator must configure private backups and ensure backup access and expiration follow the published privacy policy. The Render Blueprint does not create backups.
 
 ## API overview
 
-- `GET /api/products` — active public listings
-- `POST /api/orders` — server-validates listing IDs, quantities, and order totals before storing an order request
-- `POST /api/vendor-applications` — stores a vendor application for staff review
+- `GET /api/config` — public preview/pilot state and whether intake is open
+- `GET /api/health` — database-backed health check
+- `GET /api/products` — active listings; in pilot mode only verified-vendor listings
+- `POST /api/orders` — creates a manual request for verified-vendor listings in pilot mode
+- `POST /api/vendor-applications` — stores a vendor application when privacy settings are configured
 - `/api/admin/*` — session, overview, vendor review, order status, and listing management; all admin access is server-checked
-
-## Deploying behind HTTPS
-
-The server binds to `127.0.0.1` by default. Put it behind an HTTPS reverse proxy and set `APP_ORIGIN` to the public HTTPS origin, such as `https://market.example.com`. Keep the Node server and SQLite data directory private to the host. Set `DATA_DIR` to a durable, access-restricted directory outside the web root. Do not set a public bind address without a correctly configured TLS proxy and firewall. Create the first administrator on the host with `node server.js create-admin`; reset credentials with `node server.js reset-admin-password`.
-
-## Preview limits before a public marketplace launch
-
-- Seed listings, prices, descriptions, and rating counts are sample data. Replace them with real vendor-approved listings before marketing the marketplace as live.
-- Order requests are stored centrally, but no seller notification, payment processing, refund flow, or delivery service is connected.
-- Vendor review is a manual status workflow; it does not perform identity or business-document verification.
-- Customer and vendor contact details are stored in SQLite. Define retention and deletion rules, restrict and monitor operator access, protect backups, and publish the final privacy policy before accepting real users.
-- Admin password recovery is a local server operation. Add a controlled recovery process and multi-factor authentication before production use.
-- The sample admin page is not a substitute for a reviewed production security assessment.
-
 
